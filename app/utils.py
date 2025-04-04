@@ -1,6 +1,6 @@
 import requests
-from flask import current_app
 import re
+from flask import current_app
 
 # Mapeamento de UF para região e estado completo
 UF_MAPEAMENTO = {
@@ -76,3 +76,53 @@ def consultar_viacep(cep):
     except ValueError as e:
         current_app.logger.error(f"Erro ao processar resposta do ViaCEP: {str(e)}")
         return None
+
+
+def validar_email(email):
+    """
+    Valida se o email está em um formato correto
+    """
+    # Implementação básica, pode ser expandida
+    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    return re.match(pattern, email) is not None
+
+
+def validar_cpf(cpf):
+    """
+    Valida se o CPF é válido
+    """
+    # Remove caracteres não numéricos
+    cpf = re.sub(r'\D', '', cpf)
+    
+    # Verifica se tem 11 dígitos
+    if len(cpf) != 11:
+        return False
+    
+    # Verifica se todos os dígitos são iguais
+    if cpf == cpf[0] * 11:
+        return False
+    
+    # Validação do primeiro dígito verificador
+    soma = 0
+    peso = 10
+    for i in range(9):
+        soma += int(cpf[i]) * peso
+        peso -= 1
+    
+    resto = soma % 11
+    digito1 = 0 if resto < 2 else 11 - resto
+    
+    if int(cpf[9]) != digito1:
+        return False
+    
+    # Validação do segundo dígito verificador
+    soma = 0
+    peso = 11
+    for i in range(10):
+        soma += int(cpf[i]) * peso
+        peso -= 1
+    
+    resto = soma % 11
+    digito2 = 0 if resto < 2 else 11 - resto
+    
+    return int(cpf[10]) == digito2

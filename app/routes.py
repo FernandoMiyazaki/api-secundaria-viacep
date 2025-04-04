@@ -1,14 +1,16 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request
 from flask_restx import Resource, fields
+from sqlalchemy.exc import IntegrityError
 from .extensions import db, api
-from .models import CepConsulta
-from .utils import consultar_viacep, formatar_cep
+from .models import CepConsulta, Usuario
+from .utils import consultar_viacep, formatar_cep, validar_cpf, validar_email
 
 # Blueprint
 main = Blueprint('main', __name__)
 
-# Namespace
+# Namespaces
 ns_cep = api.namespace('cep', description='Operações relacionadas a CEP')
+ns_usuarios = api.namespace('usuarios', description='Operações relacionadas a usuários')
 
 # Models
 cep_model = api.model('CEP', {
@@ -24,6 +26,19 @@ cep_model = api.model('CEP', {
     'gia': fields.String(description='Código GIA'),
     'ddd': fields.String(description='DDD da região'),
     'siafi': fields.String(description='Código SIAFI')
+})
+
+usuario_model = api.model('Usuario', {
+    'id': fields.Integer(readonly=True, description='ID único do usuário'),
+    'nome_completo': fields.String(required=True, description='Nome completo do usuário'),
+    'email': fields.String(required=True, description='Email do usuário'),
+    'cpf': fields.String(required=True, description='CPF do usuário'),
+    'cep': fields.String(required=True, description='CEP do usuário'),
+    'complemento': fields.String(description='Complemento do endereço'),
+    'logradouro': fields.String(readonly=True, description='Logradouro'),
+    'bairro': fields.String(readonly=True, description='Bairro'),
+    'localidade': fields.String(readonly=True, description='Cidade'),
+    'estado': fields.String(readonly=True, description='Estado')
 })
 
 
@@ -147,3 +162,174 @@ class CepUpdateResource(Resource):
         except Exception as e:
             db.session.rollback()
             return {'message': f'Erro ao atualizar complemento: {str(e)}'}, 400
+
+
+@ns_usuarios.route('/')
+class UsuarioList(Resource):
+    @ns_usuarios.doc('list_usuarios')
+    @ns_usuarios.marshal_list_with(usuario_model)
+    def get(self):
+        """Lista todos os usuários"""
+        usuarios = Usuario.query.all()
+        return [usuario.to_dict() for usuario in usuarios]
+
+    @ns_usuarios.doc('create_usuario',
+                  params={
+                     'nome_completo': 'Nome completo do usuário',
+                     'email': 'Email do usuário',
+                     'senha': 'Senha do usuário',
+                     'cpf': 'CPF do usuário',
+                     'cep': 'CEP do usuário',
+                     'complemento': 'Complemento do endereço (opcional)'
+                  })
+    @ns_usuarios.response(201, 'Usuário criado com sucesso', usuario_model)
+    @ns_usuarios.response(400, 'Dados inválidos')
+    @ns_usuarios.response(409, 'Email ou CPF já existente')
+    def post(self):
+        """Cria um novo usuário"""
+        # Obtém os dados dos parâmetros
+        nome_completo = request.args.get('nome_completo')
+        email = request.args.get('email')
+        senha = request.args.get('senha')
+        cpf = request.args.get('cpf')
+        cep = request.args.get('cep')
+        complemento = request.args.get('complemento', '')
+        
+        # Verifica se os campos obrigatórios estão presentes
+        if not nome_completo:
+            return {'message': 'Campo obrigatório ausente: nome_completo'}, 400
+        if not email:
+            return {'message': 'Campo obrigatório ausente: email'}, 400
+        if not senha:
+            return {'message': 'Campo obrigatório ausente: senha'}, 400
+        if not cpf:
+            return {'message': 'Campo obrigatório ausente: cpf'}, 400
+        if not cep:
+            return {'message': 'Campo obrigatório ausente: cep'}, 400
+        
+        # Validação do email
+        if not validar_email(email):
+            return {'message': 'Email inválido'}, 400
+            
+        # Validação do CPF
+        if not validar_cpf(cpf):
+            return {'message': 'CPF inválido'}, 400
+        
+        # Consulta o CEP
+        cep_formatado = formatar_cep(cep)
+        if not cep_formatado:
+            return {'message': 'CEP inválido'}, 400
+            
+        endereco = consultar_viacep(cep_formatado)
+        if not endereco or 'erro' in endereco:
+            return {'message': 'CEP inválido ou não encontrado'}, 400
+        
+        try:
+            novo_usuario = Usuario(
+                nome_completo=nome_completo,
+                email=email,
+                senha=senha,
+                cpf=cpf,
+                cep=cep_formatado,
+                logradouro=endereco['logradouro'],
+                complemento=complemento,
+                bairro=endereco['bairro'],
+                localidade=endereco['localidade'],
+                estado=endereco['estado']
+            )
+            
+            db.session.add(novo_usuario)
+            db.session.commit()
+            
+            return novo_usuario.to_dict(), 201
+            
+        except IntegrityError:
+            db.session.rollback()
+            return {'message': 'Email ou CPF já cadastrado'}, 409
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'Erro ao criar usuário: {str(e)}'}, 400
+
+
+@ns_usuarios.route('/<int:id>')
+@ns_usuarios.response(404, 'Usuário não encontrado')
+@ns_usuarios.param('id', 'ID do usuário')
+class UsuarioResource(Resource):
+    @ns_usuarios.doc('get_usuario')
+    @ns_usuarios.marshal_with(usuario_model)
+    def get(self, id):
+        """Obtém os dados de um usuário específico"""
+        usuario = Usuario.query.get_or_404(id)
+        return usuario.to_dict()
+
+    @ns_usuarios.doc('update_usuario',
+                  params={
+                     'nome_completo': 'Nome completo do usuário',
+                     'email': 'Email do usuário',
+                     'senha': 'Senha do usuário',
+                     'cep': 'CEP do usuário',
+                     'complemento': 'Complemento do endereço'
+                  })
+    @ns_usuarios.marshal_with(usuario_model)
+    def put(self, id):
+        """Atualiza os dados de um usuário"""
+        usuario = Usuario.query.get_or_404(id)
+        
+        # Obtém os dados dos parâmetros
+        nome_completo = request.args.get('nome_completo')
+        email = request.args.get('email')
+        senha = request.args.get('senha')
+        cep = request.args.get('cep')
+        complemento = request.args.get('complemento')
+        
+        # Atualiza os campos fornecidos
+        if nome_completo:
+            usuario.nome_completo = nome_completo
+        if email:
+            if not validar_email(email):
+                return {'message': 'Email inválido'}, 400
+            usuario.email = email
+        if senha:
+            usuario.senha = senha
+        if cep:
+            cep_formatado = formatar_cep(cep)
+            if not cep_formatado:
+                return {'message': 'CEP inválido'}, 400
+                
+            # Se o CEP foi atualizado, consulta novamente
+            endereco = consultar_viacep(cep_formatado)
+            if not endereco or 'erro' in endereco:
+                return {'message': 'CEP inválido ou não encontrado'}, 400
+            
+            usuario.cep = cep_formatado
+            usuario.logradouro = endereco['logradouro']
+            usuario.bairro = endereco['bairro']
+            usuario.localidade = endereco['localidade']
+            usuario.estado = endereco['estado']
+        
+        if complemento is not None:  # Permite atualizar para string vazia
+            usuario.complemento = complemento
+        
+        try:
+            db.session.commit()
+            return usuario.to_dict()
+        except IntegrityError:
+            db.session.rollback()
+            return {'message': 'Email já cadastrado para outro usuário'}, 409
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'Erro ao atualizar usuário: {str(e)}'}, 400
+
+    @ns_usuarios.doc('delete_usuario')
+    @ns_usuarios.response(204, 'Usuário excluído')
+    def delete(self, id):
+        """Exclui um usuário"""
+        usuario = Usuario.query.get_or_404(id)
+        
+        try:
+            db.session.delete(usuario)
+            db.session.commit()
+            return '', 204
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'Erro ao excluir usuário: {str(e)}'}, 400
